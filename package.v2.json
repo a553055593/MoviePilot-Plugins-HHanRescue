@@ -1,0 +1,16 @@
+{
+  "HHanRescue": {
+    "v2": true,
+    "v3": false,
+    "name": "HHanClub 保种积分助手",
+    "description": "按保种区积分模型排序收益并自动下载最划算的保种种子。",
+    "labels": "保种,PT,站点",
+    "version": "1.0.0",
+    "author": "a553055593",
+    "level": 1,
+    "history": {
+      "v1.0.0": "首个版本：保种区收益排名 + 自动推送 qBittorrent/Transmission"
+    },
+    "icon": "https://raw.githubusercontent.com/a553055593/MoviePilot-Plugins-HHanRescue/main/icons/hhanrescue.svg"
+  }
+}
