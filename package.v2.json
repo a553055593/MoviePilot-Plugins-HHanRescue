@@ -5,14 +5,14 @@
     "name": "HHanClub 保种积分助手",
     "description": "按保种区积分模型排序收益并自动下载最划算的保种种子。",
     "labels": "保种,PT,站点",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "author": "a553055593",
     "level": 1,
     "history": {
+      "v1.0.3": "修复配置保存 500：数字框传入带逗号/单位/小数的文本时 int()/float() 直接抛异常，改为容错解析；「立即运行一次」失败也不再阻塞保存",
       "v1.0.2": "只算积分：移除憨豆口径与所有手动倍率字段，池积分倍率自动从 mybonus.php 读取（积分速率/B(池)）",
       "v1.0.1": "修复配置页空白：get_form 返回结构错误（VForm 与默认值误放进同一个数组）",
       "v1.0.0": "首个版本：保种区收益排名 + 自动推送 qBittorrent/Transmission"
-    },
-    "icon": "https://raw.githubusercontent.com/a553055593/MoviePilot-Plugins-HHanRescue/main/icons/hhanrescue.svg"
+    }
   }
 }

@@ -74,11 +74,30 @@ def bonus_b(a: float) -> float:
     return 25 * (2 / math.pi) * math.atan(a / 300 - 5) + 20
 
 
+def _to_float(val: Any, default: float = 0.0) -> float:
+    """容错转 float：前端文本框可能传来 '2,177.189'、'100GB'、''、None 等，一律不抛异常"""
+    if val is None or isinstance(val, bool):
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    text = str(val).replace(",", "").strip()
+    try:
+        return float(text)
+    except ValueError:
+        m = re.search(r"-?\d+(?:\.\d+)?", text)
+        return float(m.group()) if m else default
+
+
+def _to_int(val: Any, default: int) -> int:
+    """容错转 int：'3.5'→3、'abc'→默认值（配合 _to_float，永不抛异常）"""
+    return int(_to_float(val, default))
+
+
 class HHanRescue(_PluginBase):
     # 插件元信息
     plugin_name = "HHanClub 保种积分助手"
     plugin_desc = "按保种区积分模型排序收益并自动下载最划算的保种种子。"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "a553055593"
     plugin_config_prefix = "hhanrescue_"
     plugin_order = 30
@@ -122,12 +141,12 @@ class HHanRescue(_PluginBase):
             self._downloader = str(config.get("downloader") or "").strip()
             self._save_path = str(config.get("save_path") or "").strip()
             self._qb_category = str(config.get("qb_category") or "").strip()
-            self._max_count = int(config.get("max_count") or 3)
-            self._max_size_gb = float(config.get("max_size_gb") or 0)
-            self._min_jf_day = float(config.get("min_jf_day") or 0)
-            self._max_seeders = int(config.get("max_seeders") or 5)
+            self._max_count = _to_int(config.get("max_count"), 3)
+            self._max_size_gb = _to_float(config.get("max_size_gb"), 0)
+            self._min_jf_day = _to_float(config.get("min_jf_day"), 0)
+            self._max_seeders = _to_int(config.get("max_seeders"), 5)
             self._cron = str(config.get("cron") or "").strip()
-            self._base_a = float(config.get("base_a") or 0)
+            self._base_a = _to_float(config.get("base_a"), 0)
         if self._onlyonce:
             self._onlyonce = False
             self.update_config({
@@ -140,7 +159,11 @@ class HHanRescue(_PluginBase):
                 "base_a": self._base_a,
             })
             logger.info("HHanClub 保种助手：立即运行一次")
-            self._run()
+            try:
+                self._run()
+            except Exception as err:
+                # 立即运行失败不能影响配置保存（否则前端报 500）
+                logger.error(f"HHanClub 保种助手：立即运行出错：{err}")
 
     def get_state(self) -> bool:
         return bool(self._enabled)
