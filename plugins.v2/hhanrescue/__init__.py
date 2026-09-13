@@ -72,7 +72,7 @@ class HHanRescue(_PluginBase):
     # 插件元信息
     plugin_name = "HHanClub 保种积分助手"
     plugin_desc = "按保种区积分模型排序收益并自动下载最划算的保种种子。"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "a553055593"
     plugin_config_prefix = "hhanrescue_"
     plugin_order = 30
@@ -448,29 +448,28 @@ class HHanRescue(_PluginBase):
                         ]
                     },
                 ]
-            },
-            {
-                "enabled": False,
-                "notify": True,
-                "onlyonce": False,
-                "site_id": 0,
-                "domain": "",
-                "cookie": "",
-                "ua": "",
-                "downloader": "",
-                "save_path": "",
-                "qb_category": "",
-                "max_count": 3,
-                "max_size_gb": 0,
-                "min_jf_day": 0,
-                "max_seeders": 5,
-                "cron": "10 14 * * *",
-                "base_a": 0,
-                "agp_ratio": 1.70,
-                "pool_jf_mult": 1.75,
-                "pool_hb_mult": 1.94,
-            },
-        ]
+            }
+        ], {
+            "enabled": False,
+            "notify": True,
+            "onlyonce": False,
+            "site_id": 0,
+            "domain": "",
+            "cookie": "",
+            "ua": "",
+            "downloader": "",
+            "save_path": "",
+            "qb_category": "",
+            "max_count": 3,
+            "max_size_gb": 0,
+            "min_jf_day": 0,
+            "max_seeders": 5,
+            "cron": "10 14 * * *",
+            "base_a": 0,
+            "agp_ratio": 1.70,
+            "pool_jf_mult": 1.75,
+            "pool_hb_mult": 1.94,
+        }
 
     @staticmethod
     def get_page() -> Optional[List[dict]]:
