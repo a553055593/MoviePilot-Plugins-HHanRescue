@@ -3,17 +3,15 @@
 
 抓取 hhanclub.net 保种区（rescue.php）全部种子，按经站方规则原文推导、
 并经 34/34 独立重算验证的积分模型逐个计算「积分/天 净增量」，排序后把
-最划算的种子自动推送到 qBittorrent / Transmission。
+最划算的种子自动推送到 qBittorrent / Transmission。只算积分。
 
 公式（v3.0.0 审计口径，常数全部出自规则原文）：
   A_i   = (1 − 10^(−周数/8)) × GB × (1 + √2×10^(−(当前做种人数−1)/9))
   B(池) = 25 × (2/π) × arctan(A池/300 − 5) + 20     [保种区 B0=25，+20 常数已由站方数字证实]
-  份额  = B(池) × A_i / A池                          [按 A 占比分摊]
-  积分/天 = 份额 × 档位积分倍率 × 24
-  憨豆/天 = 份额 × 档位憨豆倍率 × 24
+  积分/天 净增量 Δ = [B(池+i)×加权积分倍率 − B(池)×池积分倍率] × 24
+  池积分倍率 = 站方积分速率 / B(池)，自动从 mybonus.php 读取，无需手填
   档位（下载瞬间人数锁定）：
-    ≤1人 → 憨豆3× / 积分2×；2-3人 → 2× / 1.75×；4-5人 → 1.5× / 1.5×
-    （0 做种按 ≤1 人档预估，属规则未写明项）
+    ≤1人 → 2×；2-3人 → 1.75×；4-5人 → 1.5×
 
 只做「下载」这一个自动化动作（用户明确要求），不做任何点赞/评论类操作。
 Cookie 只存 MoviePilot 插件配置库，不会写进任何日志或通知正文。
@@ -38,24 +36,24 @@ HOMEPAGE = "https://hhanclub.net"
 RESCUE_URL = f"{HOMEPAGE}/rescue.php"
 DETAIL_URL = f"{HOMEPAGE}/details.php?id={{id}}&hit=1"
 DOWNLOAD_URL = f"{HOMEPAGE}/download.php?id={{id}}"
-# 用户憨豆结算页：站方直接算好的「基本奖励」行 A 值 = 你的全站做种池 A
+# 用户结算页：「基本奖励」行 A 值 = 你的全站做种池 A；顶部「每小时能获取 N 个积分」= 当前积分速率
 MYBONUS_URL = f"{HOMEPAGE}/mybonus.php"
 PLUGIN_TAG = "HHanRescue"
 
-# 档位倍率：{人数区间: (憨豆倍率, 积分倍率)}
-TIERS: List[Tuple[Tuple[int, int], Tuple[float, float]]] = [
-    ((0, 1), (3.0, 2.0)),
-    ((2, 3), (2.0, 1.75)),
-    ((4, 5), (1.5, 1.5)),
+# 档位积分倍率：{人数区间: 倍率}
+TIERS: List[Tuple[Tuple[int, int], float]] = [
+    ((0, 1), 2.0),
+    ((2, 3), 1.75),
+    ((4, 5), 1.5),
 ]
 
 
-def tier_of(seeders: int) -> Tuple[float, float]:
-    """按下载瞬间人数取档位倍率（0 做种并入 ≤1 人档）"""
-    for (low, high), multipliers in TIERS:
+def tier_of(seeders: int) -> float:
+    """按下载瞬间人数取积分档位倍率（0 做种并入 ≤1 人档）"""
+    for (low, high), multiplier in TIERS:
         if low <= seeders <= high:
-            return multipliers
-    return (1.0, 1.0)
+            return multiplier
+    return 1.0
 
 
 def seeder_factor(n: int) -> float:
@@ -64,7 +62,7 @@ def seeder_factor(n: int) -> float:
 
 
 def bonus_b(a: float) -> float:
-    """池级基础憨豆量/h：25×(2/π)×arctan(A/300−5)+20（保种区 B0=25）"""
+    """池级基础速率/h：25×(2/π)×arctan(A/300−5)+20（保种区 B0=25，憨豆与积分共用此曲线）"""
     return 25 * (2 / math.pi) * math.atan(a / 300 - 5) + 20
 
 
@@ -72,7 +70,7 @@ class HHanRescue(_PluginBase):
     # 插件元信息
     plugin_name = "HHanClub 保种积分助手"
     plugin_desc = "按保种区积分模型排序收益并自动下载最划算的保种种子。"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "a553055593"
     plugin_config_prefix = "hhanrescue_"
     plugin_order = 30
@@ -97,10 +95,6 @@ class HHanRescue(_PluginBase):
     _cron = ""
     # 池基线 A（mybonus.php「基本奖励」行，站方算好的全站做种池），手动填 0 则自动抓取
     _base_a = 0.0
-    _agp_ratio = 1.70
-    # 现有池的加权倍率（积分/憨豆）。可手动覆盖；默认按"2-3档与4-5档各半"估 ≈1.75/1.94
-    _pool_jf_mult = 1.75
-    _pool_hb_mult = 1.94
 
     def __init__(self):
         super().__init__()
@@ -126,9 +120,6 @@ class HHanRescue(_PluginBase):
             self._max_seeders = int(config.get("max_seeders") or 5)
             self._cron = str(config.get("cron") or "").strip()
             self._base_a = float(config.get("base_a") or 0)
-            self._agp_ratio = float(config.get("agp_ratio") or 1.70)
-            self._pool_jf_mult = float(config.get("pool_jf_mult") or 1.75)
-            self._pool_hb_mult = float(config.get("pool_hb_mult") or 1.94)
         if self._onlyonce:
             self._onlyonce = False
             self.update_config({
@@ -138,8 +129,7 @@ class HHanRescue(_PluginBase):
                 "qb_category": self._qb_category, "max_count": self._max_count,
                 "max_size_gb": self._max_size_gb, "min_jf_day": self._min_jf_day,
                 "max_seeders": self._max_seeders, "cron": self._cron,
-                "base_a": self._base_a, "agp_ratio": self._agp_ratio,
-                "pool_jf_mult": self._pool_jf_mult, "pool_hb_mult": self._pool_hb_mult,
+                "base_a": self._base_a,
             })
             logger.info("HHanClub 保种助手：立即运行一次")
             self._run()
@@ -356,61 +346,25 @@ class HHanRescue(_PluginBase):
                             },
                         ]
                     },
-                    # 池基线 / 换算比 / 定时
+                    # 池基线 / 定时
                     {
                         'component': 'VRow',
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {'cols': 12, 'md': 3},
+                                'props': {'cols': 12, 'md': 6},
                                 'content': [{
                                     'component': 'VTextField',
                                     'props': {
                                         'model': 'base_a',
-                                        'label': '池基线 A（留 0 自动估算）',
+                                        'label': '池基线 A（留 0 自动读取 mybonus.php）',
                                         'placeholder': '0',
                                     },
                                 }]
                             },
                             {
                                 'component': 'VCol',
-                                'props': {'cols': 12, 'md': 3},
-                                'content': [{
-                                    'component': 'VTextField',
-                                    'props': {
-                                        'model': 'agp_ratio',
-                                        'label': 'A/GB 换算比（保种区≈1.70）',
-                                        'placeholder': '1.70',
-                                    },
-                                }]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 3},
-                                'content': [{
-                                    'component': 'VTextField',
-                                    'props': {
-                                        'model': 'pool_jf_mult',
-                                        'label': '现有池积分倍率（默认1.75）',
-                                        'placeholder': '1.75',
-                                    },
-                                }]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 3},
-                                'content': [{
-                                    'component': 'VTextField',
-                                    'props': {
-                                        'model': 'pool_hb_mult',
-                                        'label': '现有池憨豆倍率（默认1.94）',
-                                        'placeholder': '1.94',
-                                    },
-                                }]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 3},
+                                'props': {'cols': 12, 'md': 6},
                                 'content': [{
                                     'component': 'VTextField',
                                     'props': {
@@ -436,12 +390,10 @@ class HHanRescue(_PluginBase):
                                         'variant': 'tonal',
                                         'text': '公式：A=(1−10^(−周/8))×GB×(1+√2×10^(−(人数−1)/9))；'
                                                 'B=25×(2/π)×atan(A/300−5)+20；'
-                                                '排名按「加入你现有池后总积分的净增量」：'
-                                                'Δ=[B(new)×加权倍率 − B(old)×池倍率]×24。'
-                                                '池接近 45/h 封顶时，只有倍率高于现有池加权倍率的档位'
-                                                '（≤2人档）才会增长总量；4-5人档（1.5×）会稀释。'
-                                                '档位(下载时人数锁定)：≤1人→憨豆3×/积分2×，'
-                                                '2-3人→2×/1.75×，4-5人→1.5×/1.5×。',
+                                                '排名按「加入你现有池后总积分的净增量/天」，只看积分：'
+                                                'Δ=[B(new)×加权积分倍率 − B(old)×池积分倍率]×24，'
+                                                '池积分倍率自动从 mybonus.php 读取，无需手填。'
+                                                '档位(下载时人数锁定)：≤1人→2×，2-3人→1.75×，4-5人→1.5×。',
                                     },
                                 }]
                             },
@@ -466,9 +418,6 @@ class HHanRescue(_PluginBase):
             "max_seeders": 5,
             "cron": "10 14 * * *",
             "base_a": 0,
-            "agp_ratio": 1.70,
-            "pool_jf_mult": 1.75,
-            "pool_hb_mult": 1.94,
         }
 
     @staticmethod
@@ -496,7 +445,7 @@ class HHanRescue(_PluginBase):
             'props': {
                 'type': 'info',
                 'variant': 'tonal',
-                'text': f"最近运行：{head} · 池基线 A ≈ {last.get('base_a', 0)} · "
+                'text': f"最近运行：{head} · 池 A = {last.get('base_a', 0)} · "
                         f"共 {last.get('total', 0)} 个种子（展示前 20）",
             },
         }]
@@ -506,7 +455,7 @@ class HHanRescue(_PluginBase):
                 'props': {
                     'title': f"[{r.get('id')}] {r.get('title', '')[:60]}",
                     'subtitle': f"{r.get('size_gb', 0)}GB · {r.get('seeders')}人做种 · "
-                                f"积分 +{r.get('jf_day', 0):.1f}/天 · 憨豆 +{r.get('hb_day', 0):.1f}/天"
+                                f"积分 +{r.get('jf_day', 0):.1f}/天"
                                 + (" · 已推送下载" if r.get('downloaded') else ""),
                 },
             })
@@ -667,12 +616,26 @@ class HHanRescue(_PluginBase):
         旧版用 userdetails.php?action=7 的保种区体积表 × 换算比——没保保种区
         种子时为 0，会让所有种子算出 0 收益（池过不了曲线零点 ≈577）。
         """
+        a, _m = self._fetch_pool_state()
+        return a
+
+    def _fetch_pool_state(self) -> Tuple[float, float]:
+        """抓 mybonus.php，返回 (池基线A, 池积分倍率)
+
+        - A：bonus-table「基本奖励」行的 A 值 = 全站做种池 A（B 曲线的池）
+        - 池积分倍率：页面顶部「你当前每小时能获取 N 个积分」N 就是站方算好的
+          当前积分速率/h（系数 1 口径）。池倍率 = N / B(A)——即现有池在
+          积分口径下的等效加权档位倍率，站方数字直接算出，无需用户填写。
+          （积分 = 基本奖励行憨豆：基本奖励系数恒为 1，憨豆口径里的官种/后宫/
+          勋章加成与积分无关，所以这里只用基本行数据。）
+        """
+        base_a, pool_jf_mult = 0.0, 1.0
         if self._base_a and self._base_a > 0:
-            return self._base_a
+            base_a = self._base_a
         html = self._fetch(MYBONUS_URL)
         if not html:
-            logger.warning("HHanClub 保种助手：抓取 mybonus.php 失败，基线 A 按 0 处理")
-            return 0.0
+            logger.warning("HHanClub 保种助手：抓取 mybonus.php 失败，池状态按默认处理")
+            return base_a, pool_jf_mult
         # bonus-table「基本奖励」行的 A 值（带千分位逗号，如 6,238.021）
         m = re.search(
             r"基本奖励(?:</div>|[^<]*)*\s*<div>[^<]*</div>\s*<div>[^<]*</div>\s*<div>\s*([\d,.]+)\s*</div>",
@@ -680,36 +643,48 @@ class HHanRescue(_PluginBase):
         if not m:
             # 兜底：页面顶部「你当前每小时能获取N个积分 (A = 6238)」
             m = re.search(r"\(A\s*=\s*([\d.]+)\)", html)
-        if not m:
+        if m:
+            try:
+                base_a = float(m.group(1).replace(",", ""))
+            except ValueError:
+                logger.warning(f"HHanClub 保种助手：A 值解析失败 [{m.group(1)}]")
+        # 积分速率（页面顶部），用于反推池积分倍率
+        jf_rate = None
+        m2 = re.search(r"每小时能获取\s*([\d.]+)\s*个积分", html)
+        if m2:
+            try:
+                jf_rate = float(m2.group(1))
+            except ValueError:
+                pass
+        if base_a > 0 and jf_rate is not None:
+            b_val = bonus_b(base_a)
+            if b_val > 0:
+                pool_jf_mult = jf_rate / b_val
+                logger.info(f"HHanClub 保种助手：池 A = {base_a:.1f}，B = {b_val:.3f}/h，"
+                            f"积分速率 = {jf_rate:.3f}/h → 池积分倍率 = {pool_jf_mult:.3f}")
+            else:
+                logger.warning("HHanClub 保种助手：B(A) 为 0，池积分倍率按 1 处理")
+        elif not m:
             logger.warning("HHanClub 保种助手：未找到做种池 A，基线按 0 处理")
-            return 0.0
-        try:
-            base_a = float(m.group(1).replace(",", ""))
-        except ValueError:
-            logger.warning(f"HHanClub 保种助手：A 值解析失败 [{m.group(1)}]，基线按 0 处理")
-            return 0.0
-        logger.info(f"HHanClub 保种助手：mybonus.php 全站做种池 A = {base_a:.1f}")
-        return base_a
+        return base_a, pool_jf_mult
 
     # ------------------------------------------------------------------
     # 收益计算
     # ------------------------------------------------------------------
 
-    def _rank(self, torrents: List[Dict[str, Any]], base_a: float) -> List[Dict[str, Any]]:
-        """按「加入你现有池后总积分的净增量」排序
+    def _rank(self, torrents: List[Dict[str, Any]], base_a: float, pool_jf_mult: float) -> List[Dict[str, Any]]:
+        """按「加入你现有池后总积分的净增量」排序（只算积分）
 
         池级总量模型（饱和池下的正确边际口径）：
           总积分/天 = B(池) × 池加权积分倍率 × 24
           加入种子 i 后：池 = base_a + A_i，加权倍率 = (M×base_a + m_i×A_i)/(base_a + A_i)
           Δ = [B(new)×M_new − B(base_a)×M] × 24
-        池接近 B 封顶（45/h）时，只有档位倍率高于现有池加权倍率的种子
-        （≤2 人档）才会让总量增长；4-5 人档（1.5×）低于典型混合池加权
-        （≈1.64）反而稀释总量。排名直接按 Δ 降序，负值自然沉底。
+        池倍率 M 由站方数字反推（积分速率/B(A)，见 _fetch_pool_state），无需手填。
+        排名直接按 Δ 降序，负值自然沉底。
         """
         now = datetime.now()
         b_old = bonus_b(base_a)
-        m_jf_pool = self._pool_jf_mult
-        m_hb_pool = self._pool_hb_mult
+        m_jf_pool = pool_jf_mult if pool_jf_mult > 0 else 1.0
         results = []
         for t in torrents:
             gb = t.get("size_gb") or 0
@@ -724,14 +699,12 @@ class HHanRescue(_PluginBase):
                 delta = now - added
                 weeks = max(delta.days, 0) / 7.0
             a_i = (1 - math.pow(10, -weeks / 8)) * gb * seeder_factor(seeders)
-            hb_m, jf_m = tier_of(seeders)
+            jf_m = tier_of(seeders)
             pool_new = base_a + a_i
             b_new = bonus_b(pool_new)
             # 池级净增量（下载后 - 下载前）
             m_new_jf = (m_jf_pool * base_a + jf_m * a_i) / pool_new if pool_new > 0 else jf_m
-            m_new_hb = (m_hb_pool * base_a + hb_m * a_i) / pool_new if pool_new > 0 else hb_m
             jf_day = (b_new * m_new_jf - b_old * m_jf_pool) * 24
-            hb_day = (b_new * m_new_hb - b_old * m_hb_pool) * 24
             # 自身份额口径（= 油猴徽章显示值，供参考）
             own_share = b_new * a_i / pool_new if pool_new > 0 else 0
             results.append({
@@ -739,7 +712,6 @@ class HHanRescue(_PluginBase):
                 "A": round(a_i, 2),
                 "weeks": round(weeks, 1),
                 "jf_day": round(jf_day, 2),
-                "hb_day": round(hb_day, 2),
                 "own_jf_day": round(own_share * jf_m * 24, 2),
                 "downloaded": False,
             })
@@ -820,8 +792,8 @@ class HHanRescue(_PluginBase):
         if not torrents:
             self._notify_message("HHanClub 保种助手", "保种区解析到 0 个种子（页面结构可能变化）")
             return
-        base_a = self._estimate_base_a()
-        results = self._rank(torrents, base_a)
+        base_a, pool_jf_mult = self._fetch_pool_state()
+        results = self._rank(torrents, base_a, pool_jf_mult)
         # 过滤并取 TopN
         picked = []
         skipped: List[str] = []
@@ -863,12 +835,12 @@ class HHanRescue(_PluginBase):
         })
         # 通知
         if self._notify:
-            lines = [f"池基线 A ≈ {base_a:.0f}（B={bonus_b(base_a):.2f}/h），共 {len(results)} 个种子，"
-                     f"正收益 {sum(1 for r in results if r['jf_day'] > 0)} 个，本轮挑选 {len(picked)} 个：", ""]
+            lines = [f"池 A = {base_a:.0f}（B={bonus_b(base_a):.2f}/h，池积分倍率 {pool_jf_mult:.2f}），"
+                     f"共 {len(results)} 个种子，正收益 {sum(1 for r in results if r['jf_day'] > 0)} 个，"
+                     f"本轮挑选 {len(picked)} 个：", ""]
             for r in picked:
                 lines.append(f"· [{r['id']}] {r['title'][:40]}")
-                lines.append(f"  {r['size_gb']}GB · {r['seeders']}人做种 · 总积分 +{r['jf_day']:.2f}/天 · "
-                             f"总憨豆 +{r['hb_day']:.2f}/天 · A={r['A']:.0f}"
+                lines.append(f"  {r['size_gb']}GB · {r['seeders']}人做种 · 积分 +{r['jf_day']:.2f}/天 · A={r['A']:.0f}"
                              + (" · 已推送" if r["downloaded"] else " · 推送失败"))
             if skipped:
                 lines.append("")
