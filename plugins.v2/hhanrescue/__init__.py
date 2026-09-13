@@ -38,6 +38,7 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType, ServiceInfo
 from app.utils.http import RequestUtils
+from app.utils.string import StringUtils
 
 # 插件向下载器打的全局标签（用于识别本插件添加的种子）
 HOMEPAGE = "https://hhanclub.net"
@@ -97,7 +98,7 @@ class HHanRescue(_PluginBase):
     # 插件元信息
     plugin_name = "HHanClub 保种积分助手"
     plugin_desc = "按保种区积分模型排序收益并自动下载最划算的保种种子。"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "a553055593"
     plugin_config_prefix = "hhanrescue_"
     plugin_order = 30
@@ -186,6 +187,18 @@ class HHanRescue(_PluginBase):
             logger.error(f"获取站点列表失败：{err}")
             site_options = []
         site_options = [{"title": "不关联站点（用下方域名+Cookie）", "value": 0}] + site_options
+        # 下载器下拉：MoviePilot 已配置下载器的【名称】（get_service 按名称取，不是类型）
+        try:
+            dl_options = [{"title": name, "value": name}
+                          for name in DownloaderHelper().get_configs().keys()]
+        except Exception as err:
+            logger.error(f"获取下载器列表失败：{err}")
+            dl_options = []
+        if not dl_options:
+            dl_options = [
+                {"title": "Qbittorrent", "value": "qbittorrent"},
+                {"title": "Transmission", "value": "transmission"},
+            ]
         return [
             {
                 'component': 'VForm',
@@ -243,11 +256,8 @@ class HHanRescue(_PluginBase):
                                     'component': 'VSelect',
                                     'props': {
                                         'model': 'downloader',
-                                        'label': '下载器',
-                                        'items': [
-                                            {'title': 'Qbittorrent', 'value': 'qbittorrent'},
-                                            {'title': 'Transmission', 'value': 'transmission'},
-                                        ],
+                                        'label': '下载器（设定→下载器里配置的名称）',
+                                        'items': dl_options,
                                     },
                                 }]
                             },
@@ -758,13 +768,23 @@ class HHanRescue(_PluginBase):
     # ------------------------------------------------------------------
 
     def _service_info(self) -> Optional[ServiceInfo]:
-        """获取配置的下载器服务"""
+        """获取配置的下载器服务
+
+        DownloaderHelper.get_service(name=...) 按下载器【名称】匹配（设定→下载器里
+        自己起的名字，如 "qb" / "本地qB"），不是按类型 qbittorrent/transmission。
+        名称取不到时按类型兜底匹配，兼容旧配置里直接填类型名的情况。
+        """
         if not self._downloader:
             logger.error("HHanClub 保种助手：未配置下载器")
             return None
-        service = DownloaderHelper().get_service(name=self._downloader)
+        helper = DownloaderHelper()
+        service = helper.get_service(name=self._downloader)
         if not service:
-            logger.error(f"HHanClub 保种助手：获取下载器 [{self._downloader}] 失败")
+            # 按类型兜底：旧配置可能填的是 qbittorrent/transmission
+            service = helper.get_service(type_filter=self._downloader)
+        if not service:
+            logger.error(f"HHanClub 保种助手：获取下载器 [{self._downloader}] 失败，"
+                         f"请在插件里选择「设定→下载器」中配置的名称")
             return None
         if service.instance.is_inactive():
             logger.error(f"HHanClub 保种助手：下载器 [{self._downloader}] 未连接")
@@ -772,10 +792,18 @@ class HHanRescue(_PluginBase):
         return service
 
     def _download_torrent(self, torrent_id: int, title: str) -> Optional[str]:
-        """把单个种子推送到下载器，返回种子 hash"""
+        """把单个种子推送到下载器，返回种子 hash
+
+        直接调下载器实例的 add_torrent（与 brushflow 插件同做法）：
+        - qB：先加一个随机 Tag，添加成功后用 get_torrent_id_by_tag 回查 hash
+          （MP 侧会重试 10 次×3 秒，查到后自动删掉随机 Tag）
+        - TR：add_torrent 直接返回 Torrent 对象，取 hashString
+        插件自己的标签（PLUGIN_TAG）随后统一补打。
+        """
         service = self._service_info()
         if not service:
             return None
+        helper = DownloaderHelper()
         downloader = service.instance
         base_url, cookie, ua = self._site_context()
         dl_url = DOWNLOAD_URL.format(id=torrent_id)
@@ -786,30 +814,45 @@ class HHanRescue(_PluginBase):
         if not content:
             logger.error(f"HHanClub 保种助手：下载种子文件失败 id={torrent_id}")
             return None
-        helper = DownloaderHelper()
-        if helper.is_downloader("qbittorrent", service=service):
-            ok, _ = downloader.add_torrent(
-                content=content,
-                download_dir=self._save_path or None,
-                cookie=cookie,
-                category=self._qb_category or None,
-                tag=[PLUGIN_TAG],
-            )
-            if not ok:
+        torrent_hash: Optional[str] = None
+        try:
+            if helper.is_downloader("qbittorrent", service=service):
+                random_tag = StringUtils.generate_random_str(10)
+                ok, _ids = downloader.add_torrent(
+                    content=content,
+                    download_dir=self._save_path or None,
+                    cookie=cookie,
+                    category=self._qb_category or None,
+                    tag=[PLUGIN_TAG, random_tag],
+                )
+                if not ok:
+                    return None
+                # 随机 Tag 回查 hash（MP 内部重试；查到即删随机 Tag）
+                torrent_hash = downloader.get_torrent_id_by_tag(tags=random_tag)
+            elif helper.is_downloader("transmission", service=service):
+                added = downloader.add_torrent(
+                    content=content,
+                    download_dir=self._save_path or None,
+                    cookie=cookie,
+                    labels=[PLUGIN_TAG],
+                )
+                torrent_hash = added.hashString if added else None
+            else:
+                logger.error(f"HHanClub 保种助手：不支持的下载器类型 [{service.type}]")
                 return None
-            # 通过标签找 hash（qB 无直接返回）
-            return downloader.get_torrent_id_by_tag(tags=PLUGIN_TAG)
-        if helper.is_downloader("transmission", service=service):
-            added = downloader.add_torrent(
-                content=content,
-                download_dir=self._save_path or None,
-                cookie=cookie,
-                labels=[PLUGIN_TAG],
-            )
-            if not added:
-                return None
-            return added.hashString
-        return None
+        except Exception as err:
+            logger.error(f"HHanClub 保种助手：推送 id={torrent_id} 出错：{err}")
+            return None
+        # 补打插件标签（qB 随机 Tag 已删；这里统一确保 PLUGIN_TAG 在）
+        if torrent_hash:
+            try:
+                if helper.is_downloader("qbittorrent", service=service):
+                    downloader.set_torrents_tag(ids=torrent_hash, tags=[PLUGIN_TAG])
+                else:
+                    downloader.set_torrent_tag(ids=torrent_hash, tags=[PLUGIN_TAG])
+            except Exception as err:
+                logger.warning(f"HHanClub 保种助手：打标签失败 id={torrent_id}：{err}")
+        return torrent_hash
 
     # ------------------------------------------------------------------
     # 主流程
@@ -861,12 +904,19 @@ class HHanRescue(_PluginBase):
             except Exception as err:
                 logger.error(f"HHanClub 保种助手：推送 id={r['id']} 失败：{err}")
                 skipped.append(f"{r['id']} {r['title'][:30]}")
-        # 保存结果（详情页展示）
+        # 保存结果（详情页展示）——注意剔除 datetime 字段，plugindata 的 value 列
+        # 是 JSON 类型，SQLAlchemy 序列化不认 datetime（会报 "Object of type
+        # datetime is not JSON serializable" 并中断整个 _run）
         self.save_data("last_result", {
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "base_a": round(base_a, 1),
             "total": len(results),
-            "rows": results[:20],
+            "rows": [{
+                "id": r.get("id"), "title": r.get("title"), "size_gb": r.get("size_gb"),
+                "seeders": r.get("seeders"), "A": r.get("A"), "weeks": r.get("weeks"),
+                "jf_day": r.get("jf_day"), "own_jf_day": r.get("own_jf_day"),
+                "downloaded": r.get("downloaded"), "hash": r.get("hash"),
+            } for r in results[:20]],
         })
         # 通知
         if self._notify:
